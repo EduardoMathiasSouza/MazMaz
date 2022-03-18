@@ -89,7 +89,6 @@ void dispatcher_body (){
     while ( queue_size((queue_t*)filaTarefas) > 0 )
     {
         next = scheduler();
-        next->ativacoes++;
         if (next)
             task_switch (next) ; // transfere controle para a tarefa "next"
     }
@@ -167,6 +166,7 @@ int task_create (task_t *task, void (*start_routine)(void *),  void *arg){
 int task_switch (task_t *task){
     TarefaAnterior = TarefaAtual;
     TarefaAtual = task;
+    TarefaAtual->ativacoes++;
     if(swapcontext(&TarefaAnterior->context, &task->context) < 0)
         return -1;
     return 0;
@@ -197,7 +197,6 @@ void task_yield (){
         queue_remove((queue_t**) &filaTarefas, (queue_t*) TarefaAtual);
         queue_append((queue_t**) &filaTarefas, (queue_t*) TarefaAtual);
     }
-    dispatcher.ativacoes++;  
     task_switch(&dispatcher);
 }
 
