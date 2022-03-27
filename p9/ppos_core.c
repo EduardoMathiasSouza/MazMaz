@@ -23,7 +23,10 @@ task_t Main;
 task_t *TarefaAtual, *TarefaAnterior;
 task_t dispatcher;
 task_t *filaTarefas; 
-int count = 0; 
+task_t *filaDormitorio;
+
+int count = 0;
+int contadorAux; 
 int aging;                                  
 struct sigaction action;                    //Estrutura que define o tratador de sinal
 struct itimerval timer;                     //Estrutura de inicialização do timer
@@ -34,7 +37,6 @@ unsigned int systime ()
 {
     return tempoAtual;                      //Retorna o tempo atual de execução do programa
 }
-
 
 
 //Função que será ativada quando o temporizador chegar a um determinado tempo
@@ -51,53 +53,56 @@ void trata_timer()
         TarefaAtual->contadorQuantumTarefa--;
     }
     tempoAtual++;
+    contadorAux++;
 }
 
 task_t* scheduler(){
-    task_t* aux = filaTarefas;
-    task_t* tarefa_prioritaria = NULL;
-    int minPrio = 21;
-    int tamanhoFila = queue_size((queue_t*) filaTarefas);
-
-    //Percorre a lista de prontas
-    for(int i = 0; i < tamanhoFila; i++){
-        //Se o valor da prioridadeDinamica for menor que o valor de 'minPrio', 'minPrio' recebe a prioridadeDinamica
-        if(aux->prioridadeDinamica <= minPrio){
-            minPrio = aux->prioridadeDinamica;
-            tarefa_prioritaria = aux;
-        }
-        aux = aux->next;
-    }
-
-    //Percorre a fila de prontas novamente
-    for(int i = 0; i < tamanhoFila; i++){
-        //Se a tarefa nao for a escolhida, nao seja a de maior prioridade,ela "envelhece" somando sua prioridade dinâmica com o valor AGING
-        if(aux != tarefa_prioritaria){
-            aux->prioridadeDinamica += AGING;
-            if(aux->prioridadeDinamica < -20)
-                aux->prioridadeDinamica = -20;
-        }
-        //Se a tarefa for a escolhida, seja a de maior prioridade, o valor de prioridade dinamica = estatica
-        else
-            aux->prioridadeDinamica = aux->prioridadeEstatica;
-        aux = aux->next;}
-    return tarefa_prioritaria;
+    return filaTarefas;
 }
 
 void dispatcher_body (){
     task_t *next;
-    while ( queue_size((queue_t*)filaTarefas) > 0 )
-    {
-        next = scheduler();
-        if (next)
-            task_switch (next) ; // transfere controle para a tarefa "next"
-    }
-    task_exit(0) ; // encerra a tarefa dispatcher
+    while (1){
+        if(queue_size((queue_t*)filaDormitorio) > 0 && contadorAux >= 1000){
+            task_t *aux = filaDormitorio;
+            task_t *auxNext;
+            int tamanhoFila = queue_size((queue_t*)filaDormitorio);
+            //Percorre a lista de adormecidas
+            for(int i = 0; i < tamanhoFila; i++){
+                auxNext = aux->next;
+                aux->sleepTime--;
+                //Caso o sleeptime da tarefa for zero, hora de acorda-la e jogar na fila de Prontas
+                if(aux->sleepTime <= 0){
+                    //Se o ponteiro aux aponta para o inicio da fila
+                    if(aux == filaDormitorio){
+                        //Se tem apenas um elemento no dormitorio, o inicio da fila passa a apontar para NULL
+                        if(aux->next == aux)
+                            filaDormitorio = NULL;
+                        //Se existe mais de um elemento, o inicio da fila passa a apontar para o próximo elemento de aux*/
+                        else
+                            filaDormitorio = aux->next;
+                        }
+                    //Desperta a tarefa
+                    task_resume(aux, &filaTarefas);
+                    }
+                aux = auxNext;
+                }
+            contadorAux = 0;}
+        if(queue_size((queue_t*)filaTarefas) > 0){
+            next = scheduler();                                 
+            if(next)
+                task_switch(next);}
+        if(queue_size((queue_t*)filaTarefas) == 0 && queue_size((queue_t*)filaDormitorio) == 0)
+            break;
+        }
+    //Após executar todas as tarefas, retorna para o contexto da função main ou para o dispatcher
+    task_exit(0);
 }
 
 
 void ppos_init (){
     setvbuf (stdout, 0, _IONBF, 0);
+    task_create(&Main, NULL, NULL);
     TarefaAtual = &Main;
     Main.id = 0;
 
@@ -106,9 +111,10 @@ void ppos_init (){
     dispatcher.tipoTarefa = 0; //Dispatcher nao eh uma tarefa de usuario, sim de sistema
 
     filaTarefas = NULL;
+    filaDormitorio = NULL;
     contadorTimer = QUANTUM;
     tempoAtual = -1;
-
+    contadorAux = -1;
     //Registra a ação para o sinal de timer SIGALRM
     action.sa_handler = trata_timer;
     sigemptyset (&action.sa_mask);
@@ -129,6 +135,7 @@ void ppos_init (){
         fprintf(stderr,"Erro em setitimer: ");
         exit (1);
     }
+    task_yield();
 }
 
 int task_create (task_t *task, void (*start_routine)(void *),  void *arg){
@@ -154,11 +161,14 @@ int task_create (task_t *task, void (*start_routine)(void *),  void *arg){
    task->prioridadeEstatica = 0;
    task->prioridadeDinamica = 0;
    
-    task->tipoTarefa = 1;                //A tarefa é de usuário
-    task->contadorQuantumTarefa = QUANTUM;        //Inicializado o contador de quantum com o quantum predefinido
-    task->tempoExecucao = systime();
-    task->tempoProcessamento = 0;
-    task->ativacoes = 0;
+   task->tipoTarefa = 1;                //A tarefa é de usuário
+   task->contadorQuantumTarefa = QUANTUM;        //Inicializado o contador de quantum com o quantum predefinido
+   task->tempoExecucao = systime();
+   task->tempoProcessamento = 0;
+   task->ativacoes = 0;
+   task->suspendedQueue = NULL;
+   task->exitCode = 0;
+   task->sleepTime = 0;
 
     return task->id;
 }
@@ -173,7 +183,24 @@ int task_switch (task_t *task){
 }
 
 void task_exit (int exit_code){
+    task_t *aux = TarefaAtual->suspendedQueue;
+
+    //Caso exista algum elemento na fila de tarefas suspensas da tarefa que será finalizada
+    if(aux){
+        task_t *aux2;
+        int tamanhoFila = queue_size((queue_t*)aux);
+
+        //Percorre a fila e resume todas as tarefas que pertencem a ela
+        for(int i = 0; i < tamanhoFila; i++){
+            aux2 = aux->next;
+            task_resume(aux, &filaTarefas);
+            aux = aux2;
+        }
+        TarefaAtual->suspendedQueue = NULL;
+    }
+    TarefaAtual->exitCode = exit_code;
     if(TarefaAtual != &dispatcher && TarefaAtual != &Main){
+        TarefaAtual->status = 3;
         queue_remove((queue_t**) &filaTarefas, (queue_t*) TarefaAtual);
         TarefaAtual->tempoExecucao = systime() - TarefaAtual->tempoExecucao;
         printf("Task: %d exit: excecution time %d ms, processor time %d ms, %d activations\n",
@@ -223,3 +250,60 @@ int task_getprio (task_t *task)
 
     return task->prioridadeEstatica;
 }
+
+
+void task_suspend (task_t **queue)
+{
+    //Troca o estado da tarefa para suspensa (0)
+    TarefaAtual->status = 0;
+
+    //Remove a tarefa da fila de prontas
+    queue_remove((queue_t**) &filaTarefas, (queue_t*) TarefaAtual);
+
+    //Insere a tarefa na fila recebida
+    queue_append((queue_t**) queue, (queue_t*) TarefaAtual);
+}
+
+int task_resume (task_t *task, task_t **queue)
+{
+    //Se tarefa existe
+    if(task){
+        //Troca o estado da tarefa para pronta(2)
+        task->status = 2;
+
+        //Retira a tarefa de sua fila atual
+        if(task->next && task->prev){
+            task->prev->next = task->next;
+            task->next->prev = task->prev;
+        }
+        task->next = NULL;
+        task->prev = NULL;
+
+        //Insere a tarefa na fila de tarefas prontas
+        queue_append((queue_t**) &filaTarefas, (queue_t*) task);
+    }
+    return 1;
+}
+
+int task_join (task_t *task)
+{
+    //Se a tarefa recebida existe e nao esta finalizada, suspende a tarefa atual e a insere na fila de suspensas
+    if(task && task->status != 3){
+        task_suspend(&filaDormitorio);
+        task_yield();
+        return task->exitCode;
+    }
+    return -1;
+}
+
+void task_sleep (int t)
+{
+    //Se o tempo recebido for maior que zero, atualiza a variável sleepTime da tarefa atual
+    if(t > 0){
+        TarefaAtual->sleepTime = t;
+        //Tira a tarefa da fila de prontas e a coloca na fila de dormitorio
+        task_suspend(&filaDormitorio);
+    }
+    task_yield();
+}
+
